@@ -16,8 +16,8 @@ load_dotenv()
 # Gemini sozlamalari
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GENAI_API_KEY)
-# Barqaror va yangi Gemini 2.5 Flash modeli
-model = genai.GenerativeModel('models/gemini-2.5-flash')
+# Barqaror va yangi Gemini 1.5 Flash modeli
+model = genai.GenerativeModel('models/gemini-1.5-flash')
 
 app = FastAPI()
 
@@ -81,4 +81,5 @@ def read_root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
