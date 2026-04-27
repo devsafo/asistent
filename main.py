@@ -3,7 +3,7 @@ import io
 import asyncio
 import uuid
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import speech_recognition as sr
 from pydub import AudioSegment
@@ -18,61 +18,51 @@ GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GENAI_API_KEY:
     genai.configure(api_key=GENAI_API_KEY)
 else:
-    print("XATO: GEMINI_API_KEY topilmadi!")
+    print("OGOHLANTIRISH: GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
 
-# Tizim ko'rsatmasi (System Instruction)
-SYSTEM_PROMPT = """
-Sening isming Zeno. Sen juda aqlli va do'stona ovozli yordamchisan. 
-Foydalanuvchining savollariga juda batafsil, aniq va foydali javob ber. 
-Dangasalik qilma. Har doim o'zbek tilida javob ber.
-"""
-
-# Gemini 2.5 Flash - foydalanuvchi talab qilgan model
-model = genai.GenerativeModel(
-    model_name='gemini-2.5-flash',
-    system_instruction=SYSTEM_PROMPT
-)
+# Foydalanuvchi talab qilgan model
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 app = FastAPI()
 
-# Kataloglar
+# Kataloglarni yaratish
 STATIC_DIR = "static"
 TEMP_DIR = "temp_audio"
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-OUTPUT_FILE = f"{STATIC_DIR}/response.mp3"
+# Static fayllarni ulash (javob audio fayllari uchun)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.post("/process_audio")
 async def process_audio(request: Request):
     request_id = str(uuid.uuid4())
     input_filename = f"{TEMP_DIR}/{request_id}_input.wav"
     processed_filename = f"{TEMP_DIR}/{request_id}_processed.wav"
+    output_filename = f"{STATIC_DIR}/response.mp3"
     
     try:
+        # 1. Ovozni qabul qilish
         audio_bytes = await request.body()
-        if not audio_bytes or len(audio_bytes) < 1000:
-            print("[INFO] Audio juda qisqa yoki bo'sh")
-            return PlainTextResponse("Audio yetarli emas", status_code=400)
+        if not audio_bytes or len(audio_bytes) < 100:
+            return PlainTextResponse("Audio ma'lumot yetarli emas", status_code=400)
 
         with open(input_filename, "wb") as f:
             f.write(audio_bytes)
         
-        print(f"\n[INFO] So'rov qabul qilindi: {len(audio_bytes)} bytes")
+        print(f"\n[INFO] Yangi so'rov: {len(audio_bytes)} bytes")
 
-        # 1. Audioni normallashtirish va o'rtacha kuchaytirish (+10dB)
+        # 2. Ovozni normallashtirish va balandlatish
         try:
             audio_segment = AudioSegment.from_wav(input_filename)
             normalized = audio_segment.normalize()
-            final_audio = normalized + 10 # 15 juda baland edi, 10 qildik
+            final_audio = normalized + 10  # Ovozni 10dB ga balandlatish
             final_audio.export(processed_filename, format="wav")
         except Exception as e:
-            print(f"[XATO] Audio ishlov berishda xato: {e}")
-            with open(input_filename, "rb") as f_in:
-                with open(processed_filename, "wb") as f_out:
-                    f_out.write(f_in.read())
+            print(f"[XATO] Pydub xatosi: {e}")
+            return PlainTextResponse("Audio formatda xato", status_code=400)
 
-        # 2. STT (Ovozdan matnga)
+        # 3. Speech-to-Text (Ovozdan matnga)
         recognizer = sr.Recognizer()
         try:
             with sr.AudioFile(processed_filename) as source:
@@ -80,45 +70,38 @@ async def process_audio(request: Request):
                 user_text = recognizer.recognize_google(audio_data, language="uz-UZ")
                 print(f"[USER] {user_text}")
         except sr.UnknownValueError:
-            print("[INFO] Google ovozni taniy olmadi (shovqin yoki past ovoz)")
+            print("[INFO] Ovoz tushunilmadi")
             return PlainTextResponse("Ovoz tushunilmadi", status_code=400)
         except Exception as e:
             print(f"[XATO] STT xatosi: {e}")
             return PlainTextResponse("STT xatosi", status_code=500)
 
-        # 3. Gemini (Zeno javobi)
-        print("[ZENO] O'ylayapman...")
-        response = model.generate_content(user_text)
-        bot_text = response.text.strip()
-        print(f"[ZENO] {bot_text}")
-
-        # 4. TTS (Matndan ovozga)
-        if os.path.exists(OUTPUT_FILE):
-            os.remove(OUTPUT_FILE)
+        # 4. Gemini LLM (Aqlli javob)
+        if not GENAI_API_KEY:
+            return PlainTextResponse("API kalit o'rnatilmagan", status_code=500)
             
+        prompt = f"Sen aqlli o'zbek tilidagi yordamchisan. Foydalanuvchi gapiga juda qisqa va do'stona javob ber: {user_text}"
+        response = model.generate_content(prompt)
+        bot_text = response.text.strip()
+        print(f"[ZEN] {bot_text}")
+
+        # 5. Text-to-Speech (Matndan ovozga)
         communicate = edge_tts.Communicate(bot_text, "uz-UZ-MadinaNeural")
-        await communicate.save(OUTPUT_FILE)
+        await communicate.save(output_filename)
         
-        print("[INFO] Javob tayyorlandi.")
+        print("[INFO] Javob audiosi tayyorlandi")
         return PlainTextResponse("OK")
 
     except Exception as e:
         print(f"[XATO] Umumiy xatolik: {e}")
         return PlainTextResponse(str(e), status_code=500)
-    finally:
-        if os.path.exists(input_filename): os.remove(input_filename)
-        if os.path.exists(processed_filename): os.remove(processed_filename)
-
-@app.get("/static/response.mp3")
-async def get_audio():
-    return FileResponse(OUTPUT_FILE, media_type="audio/mpeg")
 
 @app.get("/")
 def health_check():
-    return {"status": "Zeno Online", "model": "Gemini 2.5 Flash"}
+    return {"status": "Online", "model": "Gemini 2.5 Flash", "api_key_configured": bool(GENAI_API_KEY)}
 
 if __name__ == "__main__":
     import uvicorn
+    # Port Render yoki Mahalliy muhitga moslashadi
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
